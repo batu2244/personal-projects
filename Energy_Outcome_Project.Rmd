@@ -1,0 +1,621 @@
+---
+title: "Project"
+output: pdf_document
+date: "2024-11-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+How #libaries
+```{r}
+library(arrow)
+library(dplyr)
+library(data.table)
+library(readr)
+library(readr)
+library(writexl)
+library(lubridate)
+
+#For visualisation
+library(ggplot2)
+library(sf)
+library(tigris)
+library(usmap)
+library(tidygeocoder)
+
+```
+
+# Reading the Housing Data
+```{r}
+#download file: - https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet
+
+#Read the file:
+house_data = read_parquet("/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/static_house_info.parquet")
+
+```
+
+# Reading the dictionary about the housing data
+```{r}
+dict <- read_csv("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/data_dictionary.csv")
+
+write_xlsx(dict, "Dictionary_Housing.xlsx")
+```
+
+# Checking the Housing data
+```{r}
+
+#Variables that use the electricity:
+
+#in.dehumidifier/ in.dishwasher/ in.ducts/ in.electric_vehicle/ in.emissions_electricity_units/ in.emissions_scenario_names/ in.has_pv/ in.hvac_cooling_efficiency/ in.hvac_cooling_partial_space_conditioning/ in.hvac_has_zonal_electric_heating/ in.hvac_heating_efficiency
+
+#in.hvac_shared_efficiencies/ in.lighting_interior_use/ in.lighting_other_use/ in.misc_extra_refrigerator/ in.misc_freezer/ in.misc_pool_heater/ in.misc_pool_pump/ in.natural_ventilation/ in.plug_load_diversity/ in.plug_loads/ in.pv_system_size/ in.refrigerator
+
+#in.hvac_cooling_type/ in.heating_fuel/ in.bedrooms/ in.ceiling_fan/ in.clothes_dryer/ in.clothes_washer/ in.misc_pool/ in.orientation
+
+all_variables <- c("bldg_id", "in.county", "in.dishwasher","in.ducts","in.hvac_cooling_efficiency",
+                    "in.hvac_cooling_partial_space_conditioning",
+                   "in.hvac_has_zonal_electric_heating","in.hvac_heating_efficiency",
+                   "in.misc_extra_refrigerator","in.misc_freezer",
+                   "in.plug_load_diversity","in.refrigerator", "in.hvac_cooling_type",
+                   "in.heating_fuel", "in.bedrooms", "in.ceiling_fan", "in.clothes_dryer", "in.clothes_washer",
+                   "in.orientation","in.sqft","in.city")
+
+house_trimmed <- house_data[ , all_variables]
+```
+
+## Variables That I have decided Not to Use
+
+```{r}
+#Checking the variables:
+# sum(house_trimmed$in.dehumidifier =="None") 
+# table(house_trimmed$in.orientation)
+
+#No electric vehicle.
+#No Shared HVAC in any house.
+#in.plug_loads has the same value across all houses.
+#in.dehumidifier is "none" for every house.
+#in.lighting_interior_use is same for every house.
+#in.lighting_other_use is same for every house.
+#in.pv_system_size, because of too much missing data!
+#in.has_pv, because of too much missing data!
+#in.natural_ventilation because same across every house.
+
+#Pool presence is low 12.7%, so we get rid of that variable:
+#in.misc_pool/ in.misc_pool_pump/ in.misc_pool_heater
+
+house_trimmed %>% group_by(across(all_variables)) %>% tally()
+
+```
+
+
+# Reading Houses for Batu (House_in) - change this with your csv file!
+
+```{r}
+#Reading the cvs file from the computer:
+house_batu <- read_csv("/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/house_only_data_Batu.csv")
+
+house_batu <- house_batu[ , all_variables]
+
+```
+
+# Reading the Energy Usage Data (House_out)
+
+```{r}
+# Empty variable for storing combined energy data
+energy_combined = NULL
+
+# Iterate over each building ID 
+for (building_id in house_batu$bldg_id) { #CHANGE THE NAME DEPENDING ON WHOSE DATA IT IS
+  # Construct URL to fetch energy data for each building
+  energy_data_url = paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/", building_id, ".parquet")
+  
+#Testing the code for house 237953:
+  #building_id = 237953
+  #energy_data_url = paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/237953.parquet")
+  
+  building_energy = read_parquet(energy_data_url)
+  building_energy$building_id = building_id 
+  #Creating a new column "building_id" in the building_energy with the building_id.
+  
+###Deleting the columns and rows from building_energy before the rbind:
+  #year-month-day: Get rid of the months expect July!
+  building_energy <- building_energy[month(building_energy$time) == 7, ]
+  #building_energy <- building_energy[month(building_energy$time) >= 6, ]
+
+#Adding labels for days and hours:
+ building_energy$date <- as.Date(building_energy$time)
+ building_energy$hour <- hour(building_energy$time)  
+  
+ # Summing rows with the same date within the current building's data - NOT DOING THAT.
+  #building_energy <- building_energy %>% group_by(date, building_id) %>%   
+    #summarise( across(where(is.numeric), sum, na.rm = TRUE), .groups = "drop")
+
+  energy_combined = if (is.null(energy_combined)) building_energy else rbind(energy_combined, building_energy)
+}
+
+energy_combined_backup <- energy_combined
+  # Delete blank and zero columns
+  # A blank column will have all NA values, and a zero column will have all values equal to 0
+  energy_combined <- energy_combined[, colSums(is.na(energy_combined)) < nrow(energy_combined)]  # Remove all-NA columns
+  energy_combined <- energy_combined[, colSums(energy_combined != 0, na.rm = TRUE) > 0]         # Remove all-zero columns
+
+
+energy_house_data = left_join(energy_combined, house_batu, by = c('building_id' = 'bldg_id'))
+
+```
+
+#Saving energy_house_data into a File - change the path
+```{r}
+
+#For Batu
+#write_parquet(energy_house_data, "/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/Main Project/energy_house_data.parquet")
+
+```
+
+#Reading the energy_house_data from the file - change the path
+```{r}
+
+#Reading Batu's
+energy_house_data = read_parquet("/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/Main Project/energy_house_data.parquet")
+#Energy data that has daily energy inputs and outputs for June and July!
+
+```
+
+## Merging and Cleaning the energy_house_data
+
+```{r}
+#house_batu[c("bldg_id","in.county")]
+cln_energy_house_data <- energy_house_data
+
+#Checking
+table(cln_energy_house_data$in.county)
+table( is.na(cln_energy_house_data$in.county) ) 
+
+#Getting rid of the rows with NAs for county information.
+cln_energy_house_data <- cln_energy_house_data[!is.na(cln_energy_house_data$in.county),]
+
+#This needs to be all TRUE!
+table( !is.na(cln_energy_house_data$in.county) )
+```
+
+# Calculating the Electricity Outcome
+```{r}
+#Column we have:
+#colnames(cln_energy_house_data)
+
+# Assigning 'house_batu' and 'cln_energy_house_data' have a column 'house_id' as the common identifier - don't need that
+#cln_energy_house_data <- merge(cln_energy_house_data, house_batu[, c("bldg_id", "in.sqft")], by.x = "building_id", by.y = "bldg_id", all.x = TRUE)
+
+#-------------------------------------------------------------------------
+#Variables to calculate the total electricity based energy consumption!
+#total_electricity <- 
+#energy_house_data$out.electricity.ceiling_fan.energy_consumption  +
+#energy_house_data$out.electricity.clothes_dryer.energy_consumption  +
+#energy_house_data$out.electricity.clothes_washer.energy_consumption  +
+#energy_house_data$out.electricity.cooling_fans_pumps.energy_consumption  +  
+#energy_house_data$out.electricity.cooling.energy_consumption  +   
+#energy_house_data$out.electricity.dishwasher.energy_consumption  +
+#energy_house_data$out.electricity.freezer.energy_consumption  +
+#energy_house_data$out.electricity.heating_fans_pumps.energy_consumption  +  
+#energy_house_data$out.electricity.hot_tub_heater.energy_consumption  +   
+#energy_house_data$out.electricity.hot_water.energy_consumption  +
+#energy_house_data$out.electricity.lighting_garage.energy_consumption  +
+#energy_house_data$out.electricity.mech_vent.energy_consumption  +  
+#energy_house_data$out.electricity.pool_heater.energy_consumption  +   
+#energy_house_data$out.electricity.pv.energy_consumption  +
+#energy_house_data$out.electricity.refrigerator.energy_consumption  +
+#energy_house_data$out.electricity.heating.energy_consumption  +  
+#energy_house_data$out.electricity.hot_tub_pump.energy_consumption  +
+#energy_house_data$out.electricity.lighting_exterior.energy_consumption  +
+#energy_house_data$out.electricity.lighting_interior.energy_consumption  +
+#energy_house_data$out.electricity.plug_loads.energy_consumption  +
+#energy_house_data$out.electricity.pool_pump.energy_consumption  +
+#energy_house_data$out.electricity.range_oven.energy_consumption  +
+#energy_house_data$out.electricity.well_pump.energy_consumption
+
+#Checked and confirmed that the code below gives the same output as the code above.
+
+# Calculate total electricity consumption
+cln_energy_house_data$out.total_electricity <- rowSums(
+  cln_energy_house_data %>%
+    select(contains("out.electricity")) %>%  # Select all relevant columns dynamically
+    select(ends_with("energy_consumption")), # Further narrow to energy consumption columns
+  na.rm = TRUE # Handle the NA values
+)
+               
+```
+
+#Getting rid of the energy 'output' columns!
+```{r}
+
+cln_energy_house_data <- cln_energy_house_data %>%
+  select(-contains(".energy_consumption"))
+#This should delete 28 columns/variables.
+#Initially we had 51 columns, after deleting the energy output variables we should have left with 23 variables!
+
+```
+
+
+#Merging the Weather Data
+```{r}
+weather_combined <- NULL
+
+for (county_id in unique(cln_energy_house_data$in.county)) {
+  # Construct URL to fetch energy data for each building
+  weather_data_url = paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/", county_id,".csv")
+  
+  #Checking the code for county G4500070:
+  #county_id <- "G4500070"
+  #weather_data_url = paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/G4500070.csv")
+  
+  weather_data = read_csv(weather_data_url)
+  weather_data$county_id = county_id #Creating a new column "building_id" in the building_energy with the building_id.
+
+#Labeling the days, hours, and county id:
+ weather_data$date <- as.Date(weather_data$date_time) 
+ weather_data$hour <- hour(weather_data$date_time)
+ weather_data$county_id <- weather_data$county_id
+ 
+  # Summing rows with the same date within the current building's data - NOT USING THIS
+  #weather_data <- weather_data %>% group_by(date, county_id) %>%   
+  #  summarise( across(where(is.numeric), sum, na.rm = TRUE), .groups = "drop" )
+
+  weather_combined = if (is.null(weather_combined)) weather_data else rbind(weather_combined, weather_data)
+}
+
+#Trimming out the months other than July
+weather_combined <- weather_combined[month(weather_combined$date) == 7, ]
+
+#weather_combined
+#Final merged data that consists everything
+final_merged_data <- cln_energy_house_data
+
+final_merged_data <- right_join(weather_combined, final_merged_data, by = c('county_id' = 'in.county', 'date' = 'date', 'hour' = 'hour') )
+
+#Sort the final_merged_data
+final_merged_data <- final_merged_data %>% arrange(building_id,time)
+
+```
+
+# Editing final_merged_data
+```{r}
+
+#Turning categorical data into factor
+final_merged_data$in.ducts <- as.factor(final_merged_data$in.ducts)
+final_merged_data$hour <- as.factor(final_merged_data$hour)
+final_merged_data$in.dishwasher <- as.factor(final_merged_data$in.dishwasher)
+final_merged_data$in.hvac_cooling_efficiency <- as.factor(final_merged_data$in.hvac_cooling_efficiency)
+final_merged_data$in.hvac_cooling_partial_space_conditioning <- as.factor(final_merged_data$in.hvac_cooling_partial_space_conditioning)
+final_merged_data$in.hvac_has_zonal_electric_heating <- as.factor(final_merged_data$in.hvac_has_zonal_electric_heating)
+final_merged_data$in.hvac_heating_efficiency <- as.factor(final_merged_data$in.hvac_heating_efficiency)
+final_merged_data$in.misc_extra_refrigerator <- as.factor(final_merged_data$in.misc_extra_refrigerator)
+final_merged_data$in.misc_freezer <- as.factor(final_merged_data$in.misc_freezer)
+final_merged_data$in.plug_load_diversity <- as.factor(final_merged_data$in.plug_load_diversity)
+final_merged_data$in.refrigerator <- as.factor(final_merged_data$in.refrigerator)
+final_merged_data$in.hvac_cooling_type <- as.factor(final_merged_data$in.hvac_cooling_type)
+final_merged_data$in.heating_fuel <- as.factor(final_merged_data$in.heating_fuel)
+final_merged_data$in.ceiling_fan <- as.factor(final_merged_data$in.ceiling_fan)
+final_merged_data$in.clothes_dryer <- as.factor(final_merged_data$in.clothes_dryer)
+final_merged_data$in.clothes_washer <- as.factor(final_merged_data$in.clothes_washer)
+final_merged_data$in.orientation <- as.factor(final_merged_data$in.orientation)
+
+
+#Adding temperature square
+final_merged_data$`Dry Bulb Temperature [°C]_square` <- final_merged_data$`Dry Bulb Temperature [°C]`^2
+
+```
+
+
+#Storing and reading the final data
+```{r}
+#To store
+#For Batu
+#write_parquet(final_merged_data, "/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/Main Project/final data/final_merged_data.parquet")
+
+#To read
+#Batu:
+final_merged_data_batu = read_parquet("/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/Main Project/final data/final_merged_data.parquet")
+
+"/Users/batuhanaydin/Desktop/IST\ 687 Intro to DS/Project/Main Project/final_data_batu/final_merged_data/final_merged_data.parquet"
+
+final_merged_data_batu$`Dry Bulb Temperature [°C]_square`
+```
+
+# Research Question(s):
+```{r}
+
+#In houses built between 1960 and 1970, the air ventilation is the most important stuff since the house insulation is in a bad shape.
+
+#In big houses, isolation should be even more important, so the
+
+#------------Research Question---------------
+#For houses built between 1960 and 1970, Ductless systems are better in terms of energy efficiency than the systems with duck. Centralized cooling systems are worse off in terms of energy usage.
+
+#Ductless systems are often better for energy efficiency and targeted comfort, especially for homes without existing ducts, spaces with varying usage patterns, or for retrofitting older properties. However, the choice between ductless and ducted systems should consider
+#In many homes, not all rooms are used equally throughout the day. For example:
+#Bedrooms are typically occupied only at night.
+#Home offices, guest rooms, or basements may only see occasional use.
+#Traditional ducted systems cool or heat the entire house uniformly, which can lead to wasted energy in unoccupied areas.
+
+#Duckless systems are better for old houses:
+#Because:
+
+#Lack existing ductwork and require an efficient, non-invasive solution.
+
+#Have areas with uneven usage where zoned temperature control can save energy.
+
+#Are older or historically significant, where maintaining the structural and aesthetic integrity is a priority.
+
+
+#While ductless systems are a great option for smaller to medium-sized homes, for very large homes, they may not always be the most cost-effective or efficient choice. Traditional ducted systems can handle larger spaces more efficiently and may ultimately be more economical, especially when zoned properly.
+
+# The interaction plot
+interaction.plot(
+  x.factor = final_merged_data$in.sqft,
+  trace.factor = final_merged_data$in.ducts,
+  response = final_merged_data$out.total_electricity,
+  col = c("darkgreen", "green", "blue", "yellow", "purple", "orange", "black", "red"), # Apply custom colors
+  lty = 1, # Set line type for all levels
+  lwd = 2, # Set line width for better visibility
+  xlab = "Square Footage", # Customize x-axis label
+  ylab = "Total Electricity Usage", # Customize y-axis label
+  trace.label = "Duct system" # Label for trace.factor
+)
+
+# The interaction plot
+interaction.plot(
+  x.factor = final_merged_data$`Dry Bulb Temperature [°C]`,
+  trace.factor = final_merged_data$in.ducts,
+  response = final_merged_data$out.total_electricity,
+  col = c("darkgreen", "green", "lightblue", "red", "purple", "orange", "black", "yellow"), # Apply custom colors
+  lty = 1, # Set line type for all levels
+  lwd = 2, # Set line width for better visibility
+  xlab = "Temperature", # Customize x-axis label
+  ylab = "Total Electricity Usage", # Customize y-axis label
+  trace.label = "Duct system" # Label for trace.factor
+)
+
+#final_merged_data$in.ducts <- as.factor(final_merged_data$in.ducts) -may be needed
+
+# Boxplot for categorical variable `in.ducts`
+boxplot(out.total_electricity ~ in.ducts,
+        data = final_merged_data,
+        main = "Boxplot of Electricity Usage by Duct Conditions",
+        xlab = "in.ducts",
+        ylab = "Total Electricity",
+        col = "lightblue",
+        border = "darkgrey",
+        ylim=c(-1,2.5),
+        las=2,
+        cex.axis = 0.8,
+        pch = 20)
+
+# Weather Graph
+plot(final_merged_data$`Dry Bulb Temperature [°C]`,
+     final_merged_data$out.total_electricity,
+     main = "Scatter Plot of Temperature vs Electricity",
+     xlab = "Dry Bulb Temperature [°C]",
+     ylab = "Total Electricity",
+     col = "blue",
+     pch = 20)
+
+#----------------------------------------------
+#Effect of temperature increase must be different for houses with different XXX feature.
+plot(x=final_merged_data$`Dry Bulb Temperature [°C]`, y = final_merged_data$out.total_electricity)
+hist(x=final_merged_data$`Dry Bulb Temperature [°C]`, y = final_merged_data$out.total_electricity)
+
+plot(final_merged_data$`Dry Bulb Temperature [°C]`,
+     final_merged_data$out.total_electricity,
+     main = "Scatter Plot of Temperature vs Electricity",
+     xlab = "Dry Bulb Temperature [°C]",
+     ylab = "Total Electricity",
+     col = "blue",
+     ylim=c(-0.5,15),
+     pch = 20,
+     )
+
+interaction.plot(x.factor=final_merged_data$`Dry Bulb Temperature [°C]`, trace.factor = final_merged_data$in.hvac_cooling_efficiency, response = final_merged_data$out.total_electricity)
+
+##Visualize the data - Interaction plot:
+#Cooling Efficiency and size of the house
+interaction.plot(x.factor=final_merged_data$in.hvac_cooling_efficiency, trace.factor = final_merged_data$in.bedrooms, response = final_merged_data$out.total_electricity)
+
+#Cooling type and cooling efficiency
+interaction.plot(x.factor=final_merged_data$in.hvac_cooling_efficiency, trace.factor = final_merged_data$in.hvac_cooling_type, response = final_merged_data$out.total_electricity)
+
+unique(final_merged_data$in.hvac_cooling_type)
+
+#Point graphs
+ggplot(final_merged_data) + aes(x=in.hvac_cooling_efficiency, y=out.total_electricity) + geom_point()
+
+ggplot(final_merged_data) + aes(x=`Dry Bulb Temperature [°C]`, y=out.total_electricity) + geom_boxplot()
+```
+
+#-------------------------------------------------------------------------------------------------------------------------------------------
+# Statistical Modelling
+```{r}
+
+#Model without interaction and squared temperature
+lm_model <- lm(out.total_electricity ~ . -county_id - building_id - in.hvac_cooling_type -in.city -in.heating_fuel -time -date -`Dry Bulb Temperature [°C]_square`, data = final_merged_data)
+summary(lm_model) 
+#THIS MODEL HAS LOWER R-SQUARED!
+#R-square is 0.429.
+#MAE is 0.3465059
+#MAPE is 36.45602
+
+#Model with squared tempearture only
+lm_basic_model <- lm(out.total_electricity ~ . -county_id - building_id - in.hvac_cooling_type -in.city -in.heating_fuel -time -date, data = final_merged_data)
+summary(lm_basic_model)
+#R-square is 0.432.
+#MAE is 0.3445223
+#MAPE is36.15724
+
+#-----------------------------------------------------------------------------
+#Model with interaction USE THIS!
+
+#--Batu:
+lm_model_batu <- lm(out.total_electricity ~ . -county_id - building_id - in.hvac_cooling_type+in.ducts * in.sqft -in.city -in.heating_fuel -time -date - date_time, data = final_merged_data_batu)
+summary(lm_model_batu)
+final_merged_data_batu$in.sqft
+
+#-----------------------------------------------------------------------------
+
+# Save the trained model for Shiny App
+
+#Batu:
+saveRDS(lm_model_batu, "/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/Main Project/Shiny_App_NEW/lm_model_fu_batu.rds")
+
+mean(final_merged_data$in.sqft)
+unique(final_merged_data$in.ducts)
+unique(final_merged_data$in.ceiling_fan)
+#The interaction coefficient indicates that as the total square footage of the house increases, the reduction in energy consumption associated with having a ductless system becomes smaller compared to the reduction achieved with a system having 10% leakage and R-4 insulation.
+
+```
+
+#Evaluating the statistical model
+```{r}
+lm_model_fu_batu <- readRDS("/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/Main Project/Shiny_App_NEW/lm_model_fu_batu.rds")
+
+# Evaluating the model with Mean Absolute Error
+# Make predictions using the linear model
+predictions <- predict(lm_model_fu_batu, final_merged_data_batu)
+
+# Calculate the absolute errors
+absolute_errors <- abs(final_merged_data_batu$out.total_electricity - predictions)
+
+# Calculate MAE
+MAE <- mean(absolute_errors,na.rm = TRUE)
+MAE
+
+# Calculate Mean absolute Percentage Error
+MAPE <- mean( abs((final_merged_data_batu$out.total_electricity - predictions) / final_merged_data_batu$out.total_electricity) * 100, na.rm = TRUE)
+MAPE
+#MAPE shows how much the model's predictions are off from the actual values!
+#If MAPE=30 - 30% Error: On average, for each prediction, the model is 30% away from the true value.
+
+boxplot(final_merged_data$out.total_electricity, ylim= c(-3,3.5))
+```
+
+
+#------------------------------------------------------------------------------------------------------------------------------
+
+#Visualize the data on the County level
+```{r}
+#unique(final_merged_data$county_id)
+
+#counties <- counties(cb = TRUE, resolution = "500k")
+
+fips_codes <- c("G4500070", "G4500750", "G4500730", "G4500450", "G4500830", "G4500290", 
+                "G4500490", "G4500130", "G4500630", "G4500550", "G4500910", "G4500850", 
+                "G4500150", "G4500790", "G4500770", "G4500590", "G4500190", "G4500410", 
+                "G4500690", "G4500870", "G4500310", "G4500570", "G4500710", "G4500030", 
+                "G4500510", "G4500430", "G4500250", "G4500270", "G4500210", "G4500010", 
+                "G4500890", "G4500610", "G4500350", "G4500470", "G4500670", "G4500370", 
+                "G4500110", "G4500170", "G4500230", "G4500090", "G4500050", "G4500330", 
+                "G4500650", "G4500530", "G4500390", "G4500810")
+
+cleaned_ids <- c("45007", "45075", "45073", "45045", "45083", "45029", 
+                 "45049", "45013", "45063", "45055", "45091", "45085", 
+                 "45015", "45079", "45077", "45059", "45019", "45041", 
+                 "45069", "45087", "45031", "45057", "45071", "45003", 
+                 "45051", "45043", "45025", "45027", "45021", "45001", 
+                 "45089", "45061", "45035", "45047", "45067", "45037", 
+                 "45011", "45017", "45023", "45009", "45005", "45033", 
+                 "45065", "45053", "45039", "45081")
+
+# Copying the dataset to use
+map_final_merged <- final_merged_data
+
+# Adding GEOID Codes to the map_final_merged
+map_final_merged$GEOID <- paste0(substr(map_final_merged$county_id, 2, 3) , substr(map_final_merged$county_id, 5, 7))
+
+# Subsetting the map_energy_geoid to only have energy outcome and GEOID
+map_energy_geoid <- map_final_merged[,c("out.total_electricity","GEOID")]
+
+#Write the map_energy_geoid for shinyy app:
+write_parquet(map_energy_geoid, "/Users/batuhanaydin/Desktop/IST\ 687\ Intro\ to\ DS/Project/Main\ Project/Visuals/map_energy_geoid.parquet")
+
+
+# Load shapefile (replace with your shapefile for the year 2018, downloaded it from https://www2.census.gov/geo/tiger/TIGER2018/COUNTY/)
+sc_counties_sf <- st_read("/Users/batuhanaydin/Desktop/IST 687 Intro to DS/Project/Main Project/Visuals/tl_2018_us_county/tl_2018_us_county.shp")
+
+# Filter for your county IDs
+selected_counties_sf <- sc_counties_sf %>% 
+  filter(GEOID %in% cleaned_ids )  # Adjust based on your data (change cleaned_ids)
+
+# Calculating total sum of the energy outcome for each unique GEOID. 
+energy_by_geoid <- map_energy_geoid %>%
+  group_by(GEOID) %>%
+  summarise(total_energy = sum(out.total_electricity, na.rm = TRUE))
+
+# Add metrics
+# `energy_by_geoid` is a dataframe with 'GEOID' and 'energy_usage'
+selected_counties_sf <- merge(selected_counties_sf, energy_by_geoid, by = "GEOID")
+
+# Create the map
+ggplot(data = selected_counties_sf) +
+  geom_sf(aes(fill = total_energy), color = "black") +  # Color counties by energy usage
+  scale_fill_gradient(low = "yellow", high = "red") +
+  theme_minimal() +
+  labs(title = "Energy Usage by County in South Carolina",
+       fill = "Energy Usage")
+
+```
+
+
+#Creating the new Weather Data with temperatures 5 degrees warmer
+```{r}
+weather_future <- weather_combined
+weather_future$`Dry Bulb Temperature [°C]` <- weather_future$`Dry Bulb Temperature [°C]` + 5
+
+final_merged_data_batu <- right_join(weather_future, cln_energy_house_data, by = c('county_id' = 'in.county', 'date' = 'date', 'hour' = 'hour') )
+##
+final_merged_data_batu <- final_merged_data_batu
+final_merged_data_batu$`Dry Bulb Temperature [°C]` <- final_merged_data_batu$`Dry Bulb Temperature [°C]` + 5
+final_merged_data_batu$`Dry Bulb Temperature [°C]_square` <- final_merged_data_batu$`Dry Bulb Temperature [°C]`^2
+##
+final_merged_data_batu$`Dry Bulb Temperature [°C]`
+
+unique(final_merged_data_batu$in.ducts)
+```
+
+#Statistical Analysis - FOR FUTURE
+```{r}
+#Linear Regression model with future data
+lm_model_fu <- lm(out.total_electricity ~ . -county_id - building_id - in.hvac_cooling_type+in.ducts * in.sqft -in.city -in.heating_fuel -time -date, data = final_merged_data_batu)
+summary(lm_model_fu)
+#As expected the coefficient of `Dry Bulb Temperature [°C]` decreased, meaning that every increase in temperature will cause less energy to be used. When controlling for every other thing that uses electricity to cool the house, the temperature increaase actually decreases the energy usage.
+
+
+
+unique(future_merged_data$in.ducts)
+
+fu_predict <- predict(lm_model_fu, final_merged_data_batu)
+
+max(fu_predict, na.rm=TRUE)
+#For an hour the future peak energy demand is 4.528753.
+
+#Predictions for different Regions:
+unique(future_merged_data$in.city)
+table(future_merged_data$in.city)
+
+table(future_merged_data$county_id)
+
+#Predictions based on the duct type:
+None_fu_predict <- predict(lm_model_fu, future_merged_data[future_merged_data$in.ducts=="None",] )
+max(None_fu_predict, na.rm=TRUE)
+
+R4_10per_predict <- predict(lm_model_fu, future_merged_data[future_merged_data$in.ducts=="10% Leakage, R-4",] )
+max(R4_10per_predict, na.rm=TRUE)
+
+Un_10per_predict <- predict(lm_model_fu, future_merged_data[future_merged_data$in.ducts=="10% Leakage, Uninsulated",] )
+max(Un_10per_predict, na.rm=TRUE)
+
+table(future_merged_data$in.ducts)
+
+range(future_merged_data$in.sqft)
+
+
+```
